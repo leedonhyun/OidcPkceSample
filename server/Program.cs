@@ -1,10 +1,17 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.IdentityModel.Tokens.Jwt;
+using Microsoft.IdentityModel.Tokens;
+using System.Security.Claims;
+using Microsoft.AspNetCore.DataProtection;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession();
+builder.Services.AddDataProtection()
+    .PersistKeysToFileSystem(new DirectoryInfo(@"C:\temp\keys"))
+    .SetApplicationName("OidcPkceSample");
 
 var app = builder.Build();
 app.UseSession();
@@ -14,6 +21,12 @@ Dictionary<string, string> accessTokens = new();       // access_token → user
 
 string Base64UrlEncode(byte[] input) =>
     Convert.ToBase64String(input).Replace("+", "-").Replace("/", "_").Replace("=", "");
+
+var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes("THIS_IS_A_SUPER_LONG_64_BYTE_SECRET_KEY_FOR_HS256_SECURITY_123456"));
+var signingCredentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
+
+string issuer = "http://localhost:5221";
+string audience = "YOUR_CLIENT_ID";
 
 // 1) Authorization Endpoint
 app.MapGet("/authorize", async ctx =>
@@ -86,9 +99,43 @@ app.MapPost("/token", async ctx =>
     var accessToken = Guid.NewGuid().ToString("N");
     accessTokens[accessToken] = "test-user";
 
-    var idToken = Base64UrlEncode(Encoding.UTF8.GetBytes("{\"sub\":\"test-user\"}")) + "." +
-                  Base64UrlEncode(Encoding.UTF8.GetBytes("{}")) + "." +
-                  Base64UrlEncode(Encoding.UTF8.GetBytes("signature"));
+    // var idToken = Base64UrlEncode(Encoding.UTF8.GetBytes("{\"sub\":\"test-user\"}")) + "." +
+    //               Base64UrlEncode(Encoding.UTF8.GetBytes("{}")) + "." +
+    //               Base64UrlEncode(Encoding.UTF8.GetBytes("signature"));
+
+    // var json = JsonSerializer.Serialize(new
+    // {
+    //     access_token = accessToken,
+    //     id_token = idToken,
+    //     token_type = "Bearer",
+    //     expires_in = 3600
+    // });
+
+    // ctx.Response.ContentType = "application/json";
+    // await ctx.Response.WriteAsync(json);
+
+
+    // JWT ID Token 생성
+    var claims = new[]
+    {
+    new Claim(JwtRegisteredClaimNames.Sub, "test-user"),
+    new Claim(JwtRegisteredClaimNames.Iss, issuer),
+    new Claim(JwtRegisteredClaimNames.Aud, audience),
+    new Claim(JwtRegisteredClaimNames.Iat, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64),
+};
+
+    var tokenDescriptor = new SecurityTokenDescriptor
+    {
+        Subject = new ClaimsIdentity(claims),
+        Expires = DateTime.UtcNow.AddMinutes(30),
+        SigningCredentials = signingCredentials,
+        Issuer = issuer,
+        Audience = audience
+    };
+
+    var tokenHandler = new JwtSecurityTokenHandler();
+    var securityToken = tokenHandler.CreateToken(tokenDescriptor);
+    var idToken = tokenHandler.WriteToken(securityToken);
 
     var json = JsonSerializer.Serialize(new
     {
