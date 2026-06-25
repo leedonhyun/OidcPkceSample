@@ -1,0 +1,78 @@
+## Build results
+bin/
+obj/
+out/
+[Bb]uild/
+[Bb]uilds/
+
+## Visual Studio cache/options
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Visual Studio Code
+.vscode/
+*.code-workspace
+
+## Rider
+.idea/
+*.sln.iml
+
+## NuGet
+*.nupkg
+*.snupkg
+packages/
+*.nuget.props
+*.nuget.targets
+
+## Logs
+*.log
+
+## OS generated files
+.DS_Store
+Thumbs.db
+
+## ASP.NET
+appsettings.Development.json
+appsettings.Local.json
+
+## Publish output
+publish/
+wwwroot/dist/
+wwwroot/lib/
+
+## Resharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+## Test results
+TestResult*/
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+## Entity Framework
+Migrations/
+
+## Azure
+*.azurePubxml
+PublishProfiles/
+
+## Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+
+## JetBrains Rider
+.idea/
+*.sln.iml
+
+## Others
+*.db
+*.sqlite
+*.sqlite3
