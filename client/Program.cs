@@ -11,7 +11,10 @@ builder.Services.AddDistributedMemoryCache();
 builder.Services.AddSession();
 builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(@"C:\temp\keys"))
-    .SetApplicationName("OidcPkceSample"); ;
+    .SetApplicationName("OidcPkceSample");
+
+
+
 var app = builder.Build();
 app.UseSession();
 
@@ -46,7 +49,9 @@ rsa.ImportParameters(new RSAParameters
 
 var rsaSecurityKey = new RsaSecurityKey(rsa)
 {
-    KeyId = key.GetProperty("kid").GetString()
+    //KeyId = key.GetProperty("kid").GetString()
+    KeyId = "my-rsa-key"
+
 };
 
 // PKCE 유틸
@@ -211,6 +216,13 @@ app.MapGet("/callback", async ctx =>
     //     KeyId = key.GetProperty("kid").GetString()
     // };
 
+    string? accessToken = doc.RootElement.GetProperty("access_token").GetString();
+    string? refreshToken = doc.RootElement.GetProperty("refresh_token").GetString();
+
+    if (accessToken is null || refreshToken is null)
+        throw new Exception("access_token or refresh_token is missing.");
+
+
     // JWT 검증
     var tokenHandler = new JwtSecurityTokenHandler();
     var validationParameters = new TokenValidationParameters
@@ -248,18 +260,83 @@ app.MapGet("/callback", async ctx =>
     {
         await ctx.Response.WriteAsync("Invalid ID Token: " + ex.Message);
     }
+    // 세션에 저장
+    ctx.Session.SetString("access_token", accessToken);
+    ctx.Session.SetString("refresh_token", refreshToken);
 });
 app.MapGet("/call-api", async ctx =>
 {
-    var accessToken = ctx.Request.Query["token"].ToString();
+    // var accessToken = ctx.Request.Query["token"].ToString();
 
-    using var http = new HttpClient();
-    http.DefaultRequestHeaders.Authorization =
-        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+    // using var http = new HttpClient();
+    // http.DefaultRequestHeaders.Authorization =
+    //     new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
-    var result = await http.GetStringAsync("http://localhost:5077/api/data");
+    // var result = await http.GetStringAsync("http://localhost:5221/api/data");
 
-    await ctx.Response.WriteAsync(result);
+    // await ctx.Response.WriteAsync(result);
+
+    var accessToken = ctx.Session.GetString("access_token");
+    var refreshToken = ctx.Session.GetString("refresh_token");
+
+    if (accessToken is null || refreshToken is null)
+    {
+        await ctx.Response.WriteAsync("No tokens in session. Login first.");
+        return;
+    }
+
+    using var httpClient = new HttpClient();
+
+    try
+    {
+        // 1) Access Token으로 API 호출
+        httpClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+        var apiResponse = await httpClient.GetAsync("http://localhost:5009/api/data");
+
+        // 2) Access Token 만료 → Refresh Token으로 갱신
+        if (apiResponse.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        {
+            var form = new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = refreshToken
+            };
+
+            var tokenResponse = await httpClient.PostAsync(tokenEndpoint, new FormUrlEncodedContent(form));
+            var tokenJson = await tokenResponse.Content.ReadAsStringAsync();
+
+            using var tokenDoc = JsonDocument.Parse(tokenJson);
+
+            var newAccessToken = tokenDoc.RootElement.GetProperty("access_token").GetString();
+            var newRefreshToken = tokenDoc.RootElement.GetProperty("refresh_token").GetString();
+
+            if (newAccessToken is null || newRefreshToken is null)
+            {
+                await ctx.Response.WriteAsync("Failed to refresh token:\n" + tokenJson);
+                return;
+            }
+
+            // Rotation: 새 토큰 저장
+            ctx.Session.SetString("access_token", newAccessToken);
+            ctx.Session.SetString("refresh_token", newRefreshToken);
+
+            // 3) 새 Access Token으로 API 재호출
+            httpClient.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", newAccessToken);
+
+            apiResponse = await httpClient.GetAsync("http://localhost:5009/api/data");
+        }
+
+        // 4) 최종 응답 출력
+        var result = await apiResponse.Content.ReadAsStringAsync();
+        await ctx.Response.WriteAsync(result);
+    }
+    catch (Exception ex)
+    {
+        await ctx.Response.WriteAsync("Error calling API: " + ex.Message);
+    }
 });
 
 app.MapGet("/", () => "OIDC + PKCE Sample Running. Go to /login");

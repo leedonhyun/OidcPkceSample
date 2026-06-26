@@ -12,10 +12,18 @@ builder.Services.AddSession();
 builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(@"C:\temp\keys"))
     .SetApplicationName("OidcPkceSample");
-
+// builder.Services.AddAuthentication("Bearer") .AddJwtBearer("Bearer", options =>
+// {
+//     options.Authority = "http://localhost:5221";
+//     options.Audience = "api";
+//     options.RequireHttpsMetadata = false;
+// });
+builder.Services.AddAuthorization();   
 var app = builder.Build();
-app.UseSession();
 
+// app.UseAuthentication();
+// app.UseAuthorization();
+app.UseSession();
 var keyPath = "rsa_key.xml";
 RSA rsa;
 
@@ -31,7 +39,19 @@ else
 }
 Dictionary<string, string> authorizationCodes = new(); // code → code_challenge 저장
 Dictionary<string, string> accessTokens = new();       // access_token → user
+// List<SigningKeyInfo> signingKeys = new();
+Dictionary<string, string> refreshTokens = new();
 
+// var activeKey = new RsaSecurityKey(rsa)
+// {
+//     KeyId = Guid.NewGuid().ToString("N")
+// };
+
+// signingKeys.Add(new SigningKeyInfo
+// {
+//     Key = activeKey,
+//     IsActive = true
+// });
 // string Base64UrlEncode(byte[] input) =>
 //     Convert.ToBase64String(input).Replace("+", "-").Replace("/", "_").Replace("=", "");
 
@@ -40,7 +60,9 @@ Dictionary<string, string> accessTokens = new();       // access_token → user
 //using var rsa = RSA.Create(2048);
 var rsaKey = new RsaSecurityKey(rsa)
 {
-    KeyId = Guid.NewGuid().ToString("N")
+    //KeyId = Guid.NewGuid().ToString("N")
+    KeyId = "my-rsa-key"
+
 };
 
 var signingCredentials = new SigningCredentials(rsaKey, SecurityAlgorithms.RsaSha256);
@@ -50,6 +72,25 @@ string audience = "YOUR_CLIENT_ID";
 
 app.MapGet("/jwks", async ctx =>
 {
+
+    //     var keys = signingKeys.Select(k =>
+    //   {
+    //       var p = k.Key.Rsa.ExportParameters(false);
+    //       return new
+    //       {
+    //           kty = "RSA",
+    //           use = "sig",
+    //           kid = k.Key.KeyId,
+    //           alg = "RS256",
+    //           e = Convert.ToBase64String(p.Exponent!),
+    //           n = Convert.ToBase64String(p.Modulus!)
+    //       };
+    //   });
+
+    //     var jwks = new { keys };
+    //     ctx.Response.ContentType = "application/json";
+    //     await ctx.Response.WriteAsync(JsonSerializer.Serialize(jwks));
+
     var parameters = rsa.ExportParameters(false);
 
     if (parameters.Exponent == null || parameters.Modulus == null)
@@ -76,6 +117,28 @@ app.MapGet("/jwks", async ctx =>
     ctx.Response.ContentType = "application/json";
     await ctx.Response.WriteAsync(JsonSerializer.Serialize(jwks));
 });
+// app.MapPost("/rotate-keys", ctx =>
+// {
+//     // 기존 active 키를 old로 변경
+//     foreach (var k in signingKeys)
+//         k.IsActive = false;
+
+//     // 새 키 생성
+//     RSA rsa = RSA.Create(2048);
+//     var newKey = new RsaSecurityKey(rsa)
+//     {
+//         KeyId = Guid.NewGuid().ToString("N")
+//     };
+
+//     signingKeys.Add(new SigningKeyInfo
+//     {
+//         Key = newKey,
+//         IsActive = true
+//     });
+
+//     return ctx.Response.WriteAsync("Key rotated");
+// });
+
 app.MapGet("/.well-known/openid-configuration", async ctx =>
 {
     var config = new
@@ -141,6 +204,57 @@ app.MapPost("/login", async ctx =>
 app.MapPost("/token", async ctx =>
 {
     var form = await ctx.Request.ReadFormAsync();
+    var grantType = form["grant_type"];
+
+    if (grantType == "refresh_token")
+    {
+        var oldRefreshToken = form["refresh_token"].ToString();
+
+        // Refresh Token 검증
+        if (!refreshTokens.TryGetValue(oldRefreshToken, out var userId))
+        {
+            ctx.Response.StatusCode = 400;
+            await ctx.Response.WriteAsync("Invalid refresh token");
+            return;
+        }
+
+        // Rotation: 이전 Refresh Token 폐기
+        refreshTokens.Remove(oldRefreshToken);
+
+        // 새 Refresh Token 발급
+        var newRefreshToken = Guid.NewGuid().ToString("N");
+        refreshTokens[newRefreshToken] = userId;
+
+        // 새 Access Token 발급
+        var newAccessTokenHandler = new JwtSecurityTokenHandler();
+        var newAccessTokenDescriptor = new SecurityTokenDescriptor
+        {
+            Subject = new ClaimsIdentity(new[]
+            {
+            new Claim("sub", userId),
+            new Claim("scope", "api.read")
+        }),
+            Expires = DateTime.UtcNow.AddMinutes(30),
+            Issuer = issuer,
+            Audience = "api",
+            SigningCredentials = signingCredentials
+        };
+
+        var newAccessTokenSecurity = newAccessTokenHandler.CreateToken(newAccessTokenDescriptor);
+        var newAccessToken = newAccessTokenHandler.WriteToken(newAccessTokenSecurity);
+
+        var jsonRefresh = JsonSerializer.Serialize(new
+        {
+            access_token = newAccessToken,
+            refresh_token = newRefreshToken,
+            token_type = "Bearer",
+            expires_in = 3600
+        });
+
+        ctx.Response.ContentType = "application/json";
+        await ctx.Response.WriteAsync(jsonRefresh);
+        return;
+    }
 
     var code = form["code"];
     var codeVerifier = form["code_verifier"];
@@ -251,18 +365,28 @@ app.MapPost("/token", async ctx =>
     //     var tokenHandler = new JwtSecurityTokenHandler();
     //     var securityToken = tokenHandler.CreateToken(tokenDescriptor);
     //     var idToken = tokenHandler.WriteToken(securityToken);
+    var refreshToken = Guid.NewGuid().ToString("N");
+    refreshTokens[refreshToken] = "test-user"; // userId 저장
 
+    // var json = JsonSerializer.Serialize(new
+    // {
+    //     access_token = accessToken,
+    //     id_token = idToken,
+    //     token_type = "Bearer",
+    //     expires_in = 3600
+    // });
     var json = JsonSerializer.Serialize(new
     {
         access_token = accessToken,
         id_token = idToken,
+        refresh_token = refreshToken,
         token_type = "Bearer",
         expires_in = 3600
     });
 
     ctx.Response.ContentType = "application/json";
     await ctx.Response.WriteAsync(json);
-    
+
     string Base64UrlEncode(byte[] input)
     {
         return Convert.ToBase64String(input)
@@ -273,54 +397,55 @@ app.MapPost("/token", async ctx =>
 
 
 });
-app.MapGet("/api/data", async ctx =>
-{
-    var auth = ctx.Request.Headers["Authorization"].ToString();
-    if (!auth.StartsWith("Bearer "))
-    {
-        ctx.Response.StatusCode = 401;
-        await ctx.Response.WriteAsync("Missing bearer token");
-        return;
-    }
 
-    var token = auth.Substring("Bearer ".Length);
+// app.MapGet("/api/data", async ctx =>
+// {
+//     var auth = ctx.Request.Headers["Authorization"].ToString();
+//     if (!auth.StartsWith("Bearer "))
+//     {
+//         ctx.Response.StatusCode = 401;
+//         await ctx.Response.WriteAsync("Missing bearer token");
+//         return;
+//     }
 
-    var tokenHandler = new JwtSecurityTokenHandler();
-    var validationParameters = new TokenValidationParameters
-    {
-        ValidIssuer = issuer,
-        ValidAudience = "api",
-        ValidateIssuer = true,
-        ValidateAudience = true,
-        ValidateLifetime = true,
-        ValidateIssuerSigningKey = true,
-        IssuerSigningKey = rsaKey
-    };
+//     var token = auth.Substring("Bearer ".Length);
 
-    try
-    {
-        var principal = tokenHandler.ValidateToken(token, validationParameters, out var validatedToken);
+//     var tokenHandler = new JwtSecurityTokenHandler();
+//     var validationParameters = new TokenValidationParameters
+//     {
+//         ValidIssuer = issuer,
+//         ValidAudience = "api",
+//         ValidateIssuer = true,
+//         ValidateAudience = true,
+//         ValidateLifetime = true,
+//         ValidateIssuerSigningKey = true,
+//         IssuerSigningKey = rsaKey
+//     };
 
-        var sub = principal.FindFirst("sub")?.Value;
-        var scope = principal.FindFirst("scope")?.Value;
+//     try
+//     {
+//         var principal = tokenHandler.ValidateToken(token, validationParameters, out var validatedToken);
 
-        if (scope != "api.read")
-        {
-            ctx.Response.StatusCode = 403;
-            await ctx.Response.WriteAsync("Insufficient scope");
-            return;
-        }
+//         var sub = principal.FindFirst("sub")?.Value;
+//         var scope = principal.FindFirst("scope")?.Value;
 
-        var result = new { message = "Protected data", user = sub };
-        ctx.Response.ContentType = "application/json";
-        await ctx.Response.WriteAsync(JsonSerializer.Serialize(result));
-    }
-    catch (Exception ex)
-    {
-        ctx.Response.StatusCode = 401;
-        await ctx.Response.WriteAsync("Invalid token: " + ex.Message);
-    }
-});
+//         if (scope != "api.read")
+//         {
+//             ctx.Response.StatusCode = 403;
+//             await ctx.Response.WriteAsync("Insufficient scope");
+//             return;
+//         }
+
+//         var result = new { message = "Protected data", user = sub };
+//         ctx.Response.ContentType = "application/json";
+//         await ctx.Response.WriteAsync(JsonSerializer.Serialize(result));
+//     }
+//     catch (Exception ex)
+//     {
+//         ctx.Response.StatusCode = 401;
+//         await ctx.Response.WriteAsync("Invalid token: " + ex.Message);
+//     }
+// });
 
 // 4) UserInfo Endpoint
 app.MapGet("/userinfo", async ctx =>
